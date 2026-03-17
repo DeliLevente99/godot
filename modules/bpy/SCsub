@@ -1,0 +1,28 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+env_bpy = env_modules.Clone()
+
+# Include paths
+env_bpy.Prepend(CPPPATH=["#thirdparty/manifold/include"])
+env_bpy.Prepend(CPPPATH=["#thirdparty/meshoptimizer/"])
+
+# Module source files
+module_obj = []
+
+env_bpy.add_source_files(module_obj, "*.cpp")
+env_bpy.add_source_files(module_obj, "core/*.cpp")
+env_bpy.add_source_files(module_obj, "primitives/*.cpp")
+env_bpy.add_source_files(module_obj, "modifiers/*.cpp")
+env_bpy.add_source_files(module_obj, "ops/*.cpp")
+env_bpy.add_source_files(module_obj, "utils/*.cpp")
+env_bpy.add_source_files(module_obj, "io/*.cpp")
+
+# Editor plugin (only for editor builds)
+if env.editor_build:
+    env_bpy.add_source_files(module_obj, "editor/*.cpp")
+
+env.modules_sources += module_obj
