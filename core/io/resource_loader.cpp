@@ -272,7 +272,7 @@ ResourceLoader::LoadToken::~LoadToken() {
 	clear();
 }
 
-Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_original_path, const String &p_type_hint, ResourceFormatLoader::CacheMode p_cache_mode, Error *r_error, bool p_use_sub_threads, float *r_progress) {
+Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_original_path, const String &p_type_hint, CacheMode p_cache_mode, Error *r_error, bool p_use_sub_threads, float *r_progress) {
 	const String &original_path = p_original_path.is_empty() ? p_path : p_original_path;
 	load_nesting++;
 
@@ -337,12 +337,42 @@ Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_origin
 void ResourceLoader::_run_load_task(void *p_userdata) {
 	ThreadLoadTask &load_task = *(ThreadLoadTask *)p_userdata;
 
+	bool wait = false;
 	{
 		MutexLock thread_load_lock(thread_load_mutex);
 		if (cleaning_tasks) {
 			load_task.status = THREAD_LOAD_FAILED;
 			return;
 		}
+
+		int thread_index = WorkerThreadPool::get_singleton()->get_thread_index();
+
+		if (load_task.started_load && load_task.thread_index != thread_index) {
+			wait = true;
+		} else {
+			load_task.started_load = true;
+			load_task.thread_index = thread_index;
+		}
+	}
+
+	if (wait) {
+		// There are a couple of reasons why we got here:
+		// 1) We re-started the task in _load_complete_inner but we also
+		//    got started via the original task in the WorkerThreadPool
+		// 2) There's a race between multiple threads in _load_complete_inner
+		//    and more than one thread thought they had to restart
+		//
+		// This task was already running, wait for the other thread to complete.
+		ThreadLoadStatus status;
+		do {
+			OS::get_singleton()->delay_usec(1000);
+			thread_load_mutex.lock();
+			status = load_task.status;
+			thread_load_mutex.unlock();
+		} while (status == THREAD_LOAD_IN_PROGRESS);
+
+		load_task.load_token->unreference();
+		return;
 	}
 
 	ThreadLoadTask *curr_load_task_backup = curr_load_task;
@@ -388,8 +418,8 @@ void ResourceLoader::_run_load_task(void *p_userdata) {
 	}
 	load_task.need_wait = false;
 
-	bool ignoring = load_task.cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE || load_task.cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP;
-	bool replacing = load_task.cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE || load_task.cache_mode == ResourceFormatLoader::CACHE_MODE_REPLACE_DEEP;
+	bool ignoring = load_task.cache_mode == CACHE_MODE_IGNORE || load_task.cache_mode == CACHE_MODE_IGNORE_DEEP;
+	bool replacing = load_task.cache_mode == CACHE_MODE_REPLACE || load_task.cache_mode == CACHE_MODE_REPLACE_DEEP;
 	bool unlock_pending = true;
 	if (load_task.resource.is_valid()) {
 		// From now on, no critical section needed as no one will write to the task anymore.
@@ -485,7 +515,7 @@ String ResourceLoader::_validate_local_path(const String &p_path) {
 	}
 }
 
-Error ResourceLoader::load_threaded_request(const String &p_path, const String &p_type_hint, bool p_use_sub_threads, ResourceFormatLoader::CacheMode p_cache_mode) {
+Error ResourceLoader::load_threaded_request(const String &p_path, const String &p_type_hint, bool p_use_sub_threads, CacheMode p_cache_mode) {
 	Ref<ResourceLoader::LoadToken> token = _load_start(p_path, p_type_hint, p_use_sub_threads ? LOAD_THREAD_DISTRIBUTE : LOAD_THREAD_SPAWN_SINGLE, p_cache_mode, true);
 	return token.is_valid() ? OK : FAILED;
 }
@@ -510,7 +540,7 @@ void ResourceLoader::_load_threaded_request_setup_user_token(LoadToken *p_token,
 	print_lt("REQUEST: user load tokens: " + itos(user_load_tokens.size()));
 }
 
-Ref<Resource> ResourceLoader::load(const String &p_path, const String &p_type_hint, ResourceFormatLoader::CacheMode p_cache_mode, Error *r_error) {
+Ref<Resource> ResourceLoader::load(const String &p_path, const String &p_type_hint, CacheMode p_cache_mode, Error *r_error) {
 	if (r_error) {
 		*r_error = OK;
 	}
@@ -535,11 +565,11 @@ Ref<Resource> ResourceLoader::load(const String &p_path, const String &p_type_hi
 	return res;
 }
 
-Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path, const String &p_type_hint, LoadThreadMode p_thread_mode, ResourceFormatLoader::CacheMode p_cache_mode, bool p_for_user) {
+Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path, const String &p_type_hint, LoadThreadMode p_thread_mode, CacheMode p_cache_mode, bool p_for_user) {
 	String local_path = _validate_local_path(p_path);
 	ERR_FAIL_COND_V(local_path.is_empty(), Ref<ResourceLoader::LoadToken>());
 
-	bool ignoring_cache = p_cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE || p_cache_mode == ResourceFormatLoader::CACHE_MODE_IGNORE_DEEP;
+	bool ignoring_cache = p_cache_mode == CACHE_MODE_IGNORE || p_cache_mode == CACHE_MODE_IGNORE_DEEP;
 
 	Ref<LoadToken> load_token;
 	bool must_not_register = false;
@@ -585,7 +615,7 @@ Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path,
 			load_task.type_hint = p_type_hint;
 			load_task.cache_mode = p_cache_mode;
 			load_task.use_sub_threads = p_thread_mode == LOAD_THREAD_DISTRIBUTE;
-			if (p_cache_mode == ResourceFormatLoader::CACHE_MODE_REUSE) {
+			if (p_cache_mode == CACHE_MODE_REUSE) {
 				Ref<Resource> existing = ResourceCache::get_ref(local_path);
 				if (existing.is_valid()) {
 					//referencing is fine
@@ -843,16 +873,32 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 			bool loader_is_wtp = load_task.task_id != 0;
 			if (loader_is_wtp) {
 				// Loading thread is in the worker pool.
-				p_thread_load_lock.temp_unlock();
 
 				int load_nesting_backup = load_nesting;
 				load_nesting = 0;
-				Error wait_err = WorkerThreadPool::get_singleton()->wait_for_task_completion(load_task.task_id);
+				int thread_index = WorkerThreadPool::get_singleton()->get_thread_index();
+				int task_thread_index = load_task.thread_index;
+
+				bool restart = false;
+				bool running = load_task.started_load;
+
+				p_thread_load_lock.temp_unlock();
+
+				if (running && task_thread_index != thread_index) {
+					Error wait_err = WorkerThreadPool::get_singleton()->wait_for_task_completion(load_task.task_id);
+
+					DEV_ASSERT(!wait_err || wait_err == ERR_BUSY);
+					if (wait_err == ERR_BUSY) {
+						restart = true;
+					}
+				} else {
+					restart = true;
+				}
+
 				DEV_ASSERT(load_nesting == 0);
 				load_nesting = load_nesting_backup;
 
-				DEV_ASSERT(!wait_err || wait_err == ERR_BUSY);
-				if (wait_err == ERR_BUSY) {
+				if (restart) {
 					// The WorkerThreadPool has reported that the current task wants to await on an older one.
 					// That't not allowed for safety, to avoid deadlocks. Fortunately, though, in the context of
 					// resource loading that means that the task to wait for can be restarted here to break the
@@ -907,10 +953,13 @@ Ref<Resource> ResourceLoader::_load_complete_inner(LoadToken &p_load_token, Erro
 
 	if (resource.is_valid()) {
 		if (load_task_ptr->parent_task) {
-			// A task awaiting another => Let the awaiter accumulate the resource changed connections.
-			DEV_ASSERT(load_task_ptr->parent_task != load_task_ptr);
-			for (const ThreadLoadTask::ResourceChangedConnection &rcc : load_task_ptr->resource_changed_connections) {
-				load_task_ptr->parent_task->resource_changed_connections.push_back(rcc);
+			if (!load_task_ptr->connections_propagated) {
+				// A task awaiting another => Let the awaiter accumulate the resource changed connections.
+				DEV_ASSERT(load_task_ptr->parent_task != load_task_ptr);
+				for (const ThreadLoadTask::ResourceChangedConnection &rcc : load_task_ptr->resource_changed_connections) {
+					load_task_ptr->parent_task->resource_changed_connections.push_back(rcc);
+				}
+				load_task_ptr->connections_propagated = true;
 			}
 		} else {
 			p_thread_load_lock.temp_unlock();

@@ -33,6 +33,7 @@
 #include "gdscript.h"
 #include "gdscript_cache.h"
 #include "gdscript_parser.h"
+#include "gdscript_resource_format.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_utility_functions.h"
 
@@ -53,6 +54,7 @@
 
 #include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
+#include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
 
 #ifdef TOOLS_ENABLED
@@ -135,6 +137,7 @@ static void _editor_init() {
 void initialize_gdscript_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS) {
 		GDREGISTER_CLASS(GDScript);
+		GDREGISTER_INTERNAL_CLASS(GDScriptFunctionState);
 
 		script_language_gd = memnew(GDScriptLanguage);
 		ScriptServer::register_language(script_language_gd);

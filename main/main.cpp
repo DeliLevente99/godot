@@ -47,6 +47,7 @@
 #include "core/io/image.h"
 #include "core/io/image_loader.h"
 #include "core/io/resource_loader.h"
+#include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
 #include "core/object/message_queue.h"
 #include "core/object/script_language.h"
@@ -63,8 +64,6 @@
 #include "main/main_timer_sync.h"
 #include "main/performance.h"
 #include "main/splash.gen.h"
-#include "modules/register_module_types.h"
-#include "platform/register_platform_apis.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "scene/property_list_helper.h"
@@ -83,6 +82,9 @@
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/text/text_server.h"
 #include "servers/text/text_server_dummy.h"
+
+#include "modules/register_module_types.h"
+#include "platform/register_platform_apis.h"
 
 // 2D
 #ifndef NAVIGATION_2D_DISABLED
@@ -109,6 +111,7 @@
 #endif // XR_DISABLED
 
 #ifdef TESTS_ENABLED
+#include "servers/rendering/dummy/rasterizer_dummy.h"
 #include "tests/test_main.h"
 #endif
 
@@ -614,7 +617,7 @@ void Main::print_help(const char *p_binary) {
 
 	print_help_option("--rendering-method <renderer>", "Renderer name. Requires driver support.\n");
 	print_help_option("--rendering-driver <driver>", "Rendering driver (depends on display driver).\n");
-	print_help_option("--gpu-index <device_index>", "Use a specific GPU (run with --verbose to get a list of available devices).\n");
+	print_help_option("--gpu-index <device_index>", "Use a specific GPU (only available on the Forward+/Mobile renderers; run with --verbose to get a list of available devices).\n");
 	print_help_option("--text-driver <driver>", "Text driver (used for font rendering, bidirectional support and shaping).\n");
 	print_help_option("--tablet-driver <driver>", "Pen tablet input driver.\n");
 	print_help_option("--headless", "Enable headless mode (--display-driver headless --audio-driver Dummy). Useful for servers and with --script.\n");
@@ -743,6 +746,8 @@ Error Main::test_setup() {
 
 	OS::get_singleton()->initialize();
 
+	CoreGlobals::print_ready = true;
+
 	engine = memnew(Engine);
 
 	register_core_types();
@@ -798,6 +803,13 @@ Error Main::test_setup() {
 	}
 	translation_server->load_project_translations(translation_server->get_main_domain());
 	ResourceLoader::load_translation_remaps(); //load remaps for resources
+
+	message_queue = memnew(MessageQueue);
+
+	RasterizerDummy::make_current();
+	rendering_server = memnew(RenderingServerDefault());
+	rendering_server->init();
+	rendering_server->set_render_loop_enabled(false);
 
 	// Initialize ThemeDB early so that scene types can register their theme items.
 	// Default theme will be initialized later, after modules and ScriptServer are ready.
@@ -869,6 +881,9 @@ Error Main::test_setup() {
 void Main::test_cleanup() {
 	ERR_FAIL_COND(!_start_success);
 
+	// Printing in the usual way can become problematic during/after cleanup.
+	CoreGlobals::print_ready = false;
+
 	for (int i = 0; i < TextServerManager::get_singleton()->get_interface_count(); i++) {
 		TextServerManager::get_singleton()->get_interface(i)->cleanup();
 	}
@@ -891,6 +906,17 @@ void Main::test_cleanup() {
 	unregister_scene_types();
 
 	finalize_theme_db();
+
+	if (rendering_server) {
+		rendering_server->sync();
+		rendering_server->global_shader_parameters_clear();
+		rendering_server->finish();
+		memdelete(rendering_server);
+	}
+	if (message_queue) {
+		message_queue->flush();
+		memdelete(message_queue);
+	}
 
 #ifndef NAVIGATION_2D_DISABLED
 	NavigationServer2DManager::finalize_server();
@@ -1004,6 +1030,8 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	set_current_thread_safe_for_nodes(true);
 
 	OS::get_singleton()->initialize();
+
+	CoreGlobals::print_ready = true;
 
 #if !defined(OVERRIDE_PATH_ENABLED) && !defined(TOOLS_ENABLED)
 	String old_cwd = OS::get_singleton()->get_cwd();
@@ -2825,6 +2853,8 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "xr/openxr/environment_blend_mode", PROPERTY_HINT_ENUM, "Opaque,Additive,Alpha"), "0");
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "xr/openxr/foveation_level", PROPERTY_HINT_ENUM, "Off,Low,Medium,High"), "0");
 	GLOBAL_DEF_BASIC("xr/openxr/foveation_dynamic", false);
+	GLOBAL_DEF_BASIC("xr/openxr/foveation_eye_tracked", true);
+	GLOBAL_DEF_BASIC("xr/openxr/foveation_with_subsampled_images", true);
 
 	GLOBAL_DEF_BASIC("xr/openxr/submit_depth_buffer", false);
 	GLOBAL_DEF_BASIC("xr/openxr/startup_alert", true);
@@ -4682,7 +4712,7 @@ int Main::start() {
 #ifdef TOOLS_ENABLED
 			if (editor) {
 				if (!recovery_mode && (game_path != ResourceUID::ensure_path(String(GLOBAL_GET("application/run/main_scene"))) || !editor_node->has_scenes_in_session())) {
-					Error serr = editor_node->load_scene(local_game_path);
+					Error serr = editor_node->open_scene(local_game_path);
 					if (serr != OK) {
 						ERR_PRINT("Failed to load scene");
 					}
@@ -5164,6 +5194,9 @@ void Main::cleanup(bool p_force) {
 	if (!p_force) {
 		ERR_FAIL_COND(!_start_success);
 	}
+
+	// Printing in the usual way can become problematic during/after cleanup.
+	CoreGlobals::print_ready = false;
 
 #ifdef DEBUG_ENABLED
 	if (input) {

@@ -32,7 +32,6 @@
 
 #include "core/io/image.h"
 #include "core/object/callable_mp.h"
-#include "core/object/class_db.h" // IWYU pragma: keep. `ADD_SIGNAL` macro.
 #include "core/string/translation_server.h"
 #include "editor/editor_string_names.h"
 #include "editor/run/editor_run_bar.h"
@@ -52,7 +51,7 @@ void EditorProfiler::_make_metric_ptrs(Metric &m) {
 	}
 }
 
-EditorProfiler::Metric EditorProfiler::_get_frame_metric(int index) {
+const EditorProfiler::Metric &EditorProfiler::_get_frame_metric(int index) const {
 	return frame_metrics[(frame_metrics.size() + last_metric - (total_metrics - 1) + index) % frame_metrics.size()];
 }
 
